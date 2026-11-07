@@ -1,13 +1,12 @@
-import io.minio.BucketExistsArgs;
-import io.minio.MakeBucketArgs;
-import io.minio.MinioClient;
-import io.minio.UploadObjectArgs;
+import io.minio.*;
+import io.minio.messages.Item;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -24,6 +23,7 @@ public class DataHandler {
         createBucket(minio, "bronze");
         createBucket(minio, "silver");
         putData(minio, "bronze");
+        cleanData(minio, "silver", "bronze");
     }
 
     static void createBucket (MinioClient minio, String bucket) throws Exception {
@@ -43,7 +43,7 @@ public class DataHandler {
                 BucketExistsArgs.builder().bucket(bucket).build());
 
         if (!exists || !bucket.equals("bronze")) return;
-        Path folder = Paths.get("C:\\Users\\kfirt\\OneDrive\\Desktop\\project spotify\\data\\raw\\interactions");
+        Path folder = Paths.get("C:\\Users\\kfirt\\projects\\project spotify\\data\\raw\\interactions_30");
         LocalTime timeStartUp = LocalTime.now();
         System.out.println("Transferring raw files to bronze");
 
@@ -66,5 +66,30 @@ public class DataHandler {
         long seconds = duration.toSecondsPart();
         System.out.println("Finished transferring in " + hours + "h " + minutes + "m " + seconds + "s");
             return;
+    }
+
+    static void cleanData (MinioClient minio, String bucketInput, String bucketOutput) throws Exception {
+        boolean exists = minio.bucketExists(
+                BucketExistsArgs.builder().bucket(bucketInput).build());
+
+        if (!exists || !bucketInput.equals("silver")) return;
+
+        Iterable<Result<Item>> results = minio.listObjects(
+                ListObjectsArgs.builder()
+                        .bucket("bronze")
+                        .prefix("raw/interactions/")   // only keys starting with this
+                        .recursive(true)               // go into "sub-folders" too
+                        .build());
+
+        List<String> keys = new ArrayList<>();
+        for (Result<Item> result : results) {
+            Item item = result.get();                  // may throw if a page failed to load
+            if (item.isDir()) continue;                // skip "folder" entries
+            String key = item.objectName();            // e.g. raw/interactions/1794082582317_file_84540.txt
+            if (key.endsWith(".txt")) {
+                keys.add(key);
+            }
+        }
+        System.out.println("Found " + keys.size() + " files");
     }
 }
