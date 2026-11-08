@@ -1,16 +1,24 @@
 import io.minio.*;
 import io.minio.messages.Item;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.util.ArrayList;
-import java.util.List;
+import java.time.format.DateTimeParseException;
+import java.util.*;
 import java.util.stream.Stream;
 
 public class DataHandler {
+
+    private static final Set<String> ValidEvents = Set.of("play", "like", "search", "listen");
+    record SeperatedData(LocalDateTime localDateTime, UUID uuid, String eventType, int episodeNumber, String fileKey) {}
+    record FaultyLines (String fileKey, String line, String reason) {}
+    final Set<Integer> realEpisodes = new HashSet<>();
 
     public static void main (String[] args) throws Exception {
         String endpoint = System.getenv().getOrDefault("MINIO_ENDPOINT", "http://localhost:9000");
@@ -22,7 +30,7 @@ public class DataHandler {
 
         createBucket(minio, "bronze");
         createBucket(minio, "silver");
-        putData(minio, "bronze");
+        //putData(minio, "bronze");
         cleanData(minio, "silver", "bronze");
     }
 
@@ -74,22 +82,88 @@ public class DataHandler {
 
         if (!exists || !bucketInput.equals("silver")) return;
 
+
+        List<SeperatedData> seperatedData = new ArrayList<>();
+        List<FaultyLines> faultyLines = new ArrayList<>();
+
+
         Iterable<Result<Item>> results = minio.listObjects(
                 ListObjectsArgs.builder()
                         .bucket("bronze")
-                        .prefix("raw/interactions/")   // only keys starting with this
-                        .recursive(true)               // go into "sub-folders" too
+                        .prefix("raw/interactions/")
+                        .recursive(true)
                         .build());
 
-        List<String> keys = new ArrayList<>();
         for (Result<Item> result : results) {
-            Item item = result.get();                  // may throw if a page failed to load
-            if (item.isDir()) continue;                // skip "folder" entries
-            String key = item.objectName();            // e.g. raw/interactions/1794082582317_file_84540.txt
-            if (key.endsWith(".txt")) {
-                keys.add(key);
+            Item item = result.get();
+            if (item.isDir() || !item.objectName().endsWith("txt")) continue;
+            String fileKey = item.objectName();
+
+            try (InputStream stream = minio.getObject(
+                    GetObjectArgs.builder().bucket(bucketOutput).object(item.objectName()).build())) {
+                String content = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+
+                content = content.replace("\uFEFF", "");
+                content = content.replace("\u200B", "");
+                content = content.replaceAll("\\h+", "");
+
+                String[] lines = content.split("\\R");
+                int i = 0;
+
+                for (String line : lines) {
+                    if (line.isEmpty()) continue;
+
+                    try {
+                        seperatedData.add(parseLine(line, fileKey));
+                    } catch (BadLineException e) {
+                        faultyLines.add(new FaultyLines(fileKey, line, e.getMessage()));
+                    }
+
+                }
             }
+
+
         }
-        System.out.println("Found " + keys.size() + " files");
+
     }
+    static SeperatedData parseLine (String line, String fileKey) throws BadLineException {
+
+        String[] separateData = line.split("\\|", -1);
+
+        if (separateData.length != 4) throw new BadLineException("Wrong amount of lines " + separateData.length);
+        for (String s : separateData)
+            if (s.isEmpty()) throw new BadLineException("empty line");
+
+        LocalDateTime localDateTime;
+        try {
+            localDateTime = LocalDateTime.parse(separateData[0]);
+        } catch (DateTimeParseException e) {
+            throw new BadLineException("Bad timestamp");
+        }
+
+        UUID uuid;
+        try {
+            uuid = UUID.fromString(separateData[1]);
+        } catch (IllegalArgumentException e) {
+            throw new BadLineException("Bad user id");
+        }
+
+        String event = separateData[2].toLowerCase();
+        if (!ValidEvents.contains(event)) throw new BadLineException("Unkown event " + event);
+
+        String[] episodeInfo = separateData[3].split("-");
+        if (episodeInfo.length != 2 || !episodeInfo[0].equalsIgnoreCase("episode")) throw new BadLineException("Bad episode format");
+        int episodeNumber;
+        try {
+            episodeNumber = Integer.parseInt(episodeInfo[1]);
+        } catch (IllegalArgumentException e){
+            throw new BadLineException("Bad episode number");
+        }
+
+        //if (!realEpisodes.contains(episodeNumber)) throw new BadLineException("Episode does not exist");
+
+        return new SeperatedData(localDateTime, uuid, event, episodeNumber, fileKey);
+    }
+
+
 }
