@@ -21,6 +21,10 @@ repositories {
 val jacksonVersion = "2.20.0"
 
 dependencies {
+    implementation("com.rometools:rome:2.1.0")
+
+    implementation("com.rometools:rome-modules:2.1.0")
+
     implementation("io.minio:minio:8.5.17")
 
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
@@ -57,4 +61,13 @@ tasks.shadowJar {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+// Hebrew support on Windows: compile sources and run the app as UTF-8
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
+tasks.withType<JavaExec>().configureEach {
+    jvmArgs("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
 }
