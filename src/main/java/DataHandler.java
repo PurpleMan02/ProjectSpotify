@@ -30,8 +30,8 @@ import java.util.stream.Stream;
 
 public class DataHandler {
 
-    private static final Set<String> ValidEvents = Set.of("play", "like", "search", "listen");
-    record SeparatedData (LocalDateTime localDateTime, UUID uuid, String eventType, int episodeNumber, String fileKey) {}
+    private static final Set<String> ValidEvents = Set.of("like", "search", "listen");
+    record SeparatedData (LocalDateTime localDateTime, String event_id, String eventType, int episodeNumber, String fileKey) {}
     record FaultyLines (String fileKey, String line, String reason) {}
     record Episode (int episodeNumber, String title, LocalDateTime pubDate, int duration,
                    String description, String audioUrl, String mp3Key) {}
@@ -47,6 +47,13 @@ public class DataHandler {
             .connectTimeout(Duration.ofSeconds(20))
             .build();
 
+    private static final String DATA_DIR = System.getenv().getOrDefault("DATA_DIR", "../data");
+    private static final String MINIO_ENDPOINT = System.getenv().getOrDefault("MINIO_ENDPOINT", "http://localhost:9000");
+    private static final String MINIO_HOST = MINIO_ENDPOINT.replace("http://", "");
+
+    private static final String PG_HOST = System.getenv().getOrDefault("PG_HOST", "localhost");
+    private static final String PG_PORT = System.getenv().getOrDefault("PG_PORT", "5433");
+
     public static void main (String[] args) throws Exception {
         String endpoint = System.getenv().getOrDefault("MINIO_ENDPOINT", "http://localhost:9000");
 
@@ -55,14 +62,26 @@ public class DataHandler {
                 .credentials("minioadmin", "minioadmin")
                 .build();
 
+        switch (args[0]) {
+            case "bronze":
+                createBucket(minio, "bronze");
+                putData(minio, "bronze");
+                break;
 
+            case "silver":
+                createBucket(minio, "silver");
+                cleanData(minio, "silver", "bronze");
+                createPar();
+                break;
 
-        createBucket(minio, "bronze");
-        createBucket(minio, "silver");
-        //putData(minio, "bronze");
-        cleanData(minio, "silver", "bronze");
-        createPar();
-        createDB();
+            case "gold":
+                createDB();
+                break;
+
+            default:
+                System.out.println("Unknown command: " + args[0]);
+                System.exit(1);
+        }
     }
 
     static void createBucket (MinioClient minio, String bucket) throws Exception {
@@ -82,7 +101,7 @@ public class DataHandler {
                 BucketExistsArgs.builder().bucket(bucket).build());
 
         if (!exists || !bucket.equals("bronze")) return;
-        Path folder = Paths.get("C:\\Users\\kfirt\\projects\\project spotify\\data\\raw\\interactions_30");
+        Path folder = Paths.get(DATA_DIR, "raw", "interactions");
         LocalTime timeStartUp = LocalTime.now();
         System.out.println("Transferring raw files to bronze");
 
@@ -103,7 +122,7 @@ public class DataHandler {
                 UploadObjectArgs.builder()
                         .bucket(bucket)
                         .object("raw/feed.xml")
-                        .filename("C:\\Users\\kfirt\\projects\\project spotify\\data\\raw\\feed.xml")
+                        .filename(Paths.get(DATA_DIR, "raw", "feed.xml").toString())
                         .build());
 
         LocalTime timeFinishing = LocalTime.now();
@@ -248,9 +267,9 @@ public class DataHandler {
             throw new BadLineException("Bad timestamp");
         }
 
-        UUID uuid;
+        String event_id;
         try {
-            uuid = UUID.fromString(separateData[1]);
+            event_id = separateData[1];
         } catch (IllegalArgumentException e) {
             throw new BadLineException("Bad user id");
         }
@@ -269,24 +288,14 @@ public class DataHandler {
 
         if (episodeNumber > numOfEpisodes || episodeNumber < 1) throw new BadLineException("Episode does not exist");
 
-        return new SeparatedData(localDateTime, uuid, event, episodeNumber, fileKey);
+        return new SeparatedData(localDateTime, event_id, event, episodeNumber, fileKey);
     }
 
     static void createPar () {
         try (Connection db = DriverManager.getConnection("jdbc:duckdb:");
              Statement st = db.createStatement()) {
 
-            st.execute("INSTALL httpfs");
-            st.execute("LOAD httpfs");
-            st.execute("""
-        CREATE SECRET minio (
-            TYPE S3,
-            KEY_ID 'minioadmin',
-            SECRET 'minioadmin',
-            ENDPOINT 'localhost:9000',
-            URL_STYLE 'path',
-            USE_SSL false
-        )""");
+            connectDuckToMinio(st);
 
             st.execute("""
         CREATE TABLE episodes (
@@ -301,7 +310,7 @@ public class DataHandler {
             st.execute("""
         CREATE TABLE events (
             event_time      TIMESTAMP,
-            uuid            UUID,
+            event_id        VARCHAR,
             event_type      VARCHAR,
             episode_num     INTEGER,
             file_key        VARCHAR
@@ -327,7 +336,7 @@ public class DataHandler {
 
                 for (SeparatedData s : separatedData) {
                     insert.setObject(1, s.localDateTime());
-                    insert.setString(2, s.uuid.toString());
+                    insert.setString(2, s.event_id);
                     insert.setString(3, s.eventType());
                     insert.setInt(4, s.episodeNumber());
                     insert.setString(5, s.fileKey());
@@ -367,7 +376,7 @@ public class DataHandler {
             st.execute("""
                     CREATE TABLE events (
                         event_time      TIMESTAMP NOT NULL,
-                        uuid            UUID NOT NULL,
+                        event_id        VARCHAR NOT NULL,
                         event_type      VARCHAR NOT NULL,
                         episode_num     INTEGER NOT NULL REFERENCES episodes (episode_number),
                         file_key        VARCHAR NOT NULL
@@ -382,22 +391,11 @@ public class DataHandler {
         try (Connection db = DriverManager.getConnection("jdbc:duckdb:");
              Statement st = db.createStatement()) {
 
-            st.execute("INSTALL httpfs");
-            st.execute("LOAD httpfs");
-            st.execute("""
-                    CREATE SECRET minio (
-                        TYPE S3,
-                        KEY_ID 'minioadmin',
-                        SECRET 'minioadmin',
-                        ENDPOINT 'localhost:9000',
-                        URL_STYLE 'path',
-                        USE_SSL false
-                    )""");
+            connectDuckToMinio(st);
 
             st.execute("INSTALL postgres");
             st.execute("LOAD postgres");
-            st.execute("ATTACH 'host=localhost port=5433 dbname=postgres user=postgres password=postgres' AS pg (TYPE postgres)");
-
+            st.execute("ATTACH 'host=" + PG_HOST + " port=" + PG_PORT + " dbname=postgres user=postgres password=postgres' AS pg (TYPE postgres)");
             st.execute("""
             INSERT INTO pg.public.episodes
             SELECT episode_number, title, pub_date, duration, description, audio_url, mp3_key
@@ -405,8 +403,8 @@ public class DataHandler {
             """);
 
                 st.execute("""
-            INSERT INTO pg.public.events (event_time, uuid, event_type, episode_num, file_key)
-            SELECT event_time, uuid, event_type, episode_num, file_key
+            INSERT INTO pg.public.events (event_time, event_id, event_type, episode_num, file_key)
+            SELECT event_time, event_id, event_type, episode_num, file_key
             FROM read_parquet('s3://silver/events/events.parquet')
             """);
 
@@ -415,6 +413,13 @@ public class DataHandler {
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    static void connectDuckToMinio(Statement st) throws SQLException {
+        st.execute("INSTALL httpfs");
+        st.execute("LOAD httpfs");
+        st.execute("CREATE SECRET minio (TYPE S3, KEY_ID 'minioadmin', SECRET 'minioadmin', "
+                + "ENDPOINT '" + MINIO_HOST + "', URL_STYLE 'path', USE_SSL false)");
     }
 
     }

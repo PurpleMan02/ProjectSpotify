@@ -18,6 +18,13 @@ repositories {
     mavenCentral()
 }
 
+tasks.shadowJar {
+    archiveFileName = "mamramic-etl.jar"
+    destinationDirectory = file("../jars")
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    mergeServiceFiles()
+}
+
 val jacksonVersion = "2.20.0"
 
 dependencies {
@@ -50,20 +57,14 @@ dependencies {
 }
 
 application {
-    // Change this if your main class lives somewhere else
-    mainClass = "Main"
+    mainClass = "DataHandler"
 }
 
-tasks.shadowJar {
-    archiveFileName = "mamramic-etl.jar"
-    mergeServiceFiles()
-}
 
 tasks.test {
     useJUnitPlatform()
 }
 
-// Hebrew support on Windows: compile sources and run the app as UTF-8
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
 }
