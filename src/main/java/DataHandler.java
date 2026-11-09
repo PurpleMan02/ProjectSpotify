@@ -33,7 +33,7 @@ public class DataHandler {
     private static final Set<String> ValidEvents = Set.of("play", "like", "search", "listen");
     record SeparatedData (LocalDateTime localDateTime, UUID uuid, String eventType, int episodeNumber, String fileKey) {}
     record FaultyLines (String fileKey, String line, String reason) {}
-    record Episode (int episodeNumber, String displayTitle, LocalDateTime pubDate, int durationSec,
+    record Episode (int episodeNumber, String title, LocalDateTime pubDate, int duration,
                    String description, String audioUrl, String mp3Key) {}
 
     private static final List<Episode> episodes = new ArrayList<>();
@@ -62,6 +62,7 @@ public class DataHandler {
         //putData(minio, "bronze");
         cleanData(minio, "silver", "bronze");
         createPar();
+        createDB();
     }
 
     static void createBucket (MinioClient minio, String bucket) throws Exception {
@@ -180,11 +181,11 @@ public class DataHandler {
                     }
                 }
                 EntryInformation itunes = (EntryInformation) entry.getModule(ITunes.URI);
-                int durationSec = (int) (itunes.getDuration().getMilliseconds() / 1000);
+                int duration = (int) (itunes.getDuration().getMilliseconds() / 1000);
 
                 String description = Jsoup.parse(entry.getDescription().getValue()).text();
 
-                episodes.add(new Episode(episodeNumber, fileTitle, pbDate, durationSec,
+                episodes.add(new Episode(episodeNumber, fileTitle, pbDate, duration,
                         description, audioUrl, mp3Key));
             }
         }
@@ -290,9 +291,9 @@ public class DataHandler {
             st.execute("""
         CREATE TABLE episodes (
             episode_number  INTEGER,
-            display_title   VARCHAR,
+            title           VARCHAR,
             pub_date        TIMESTAMP,
-            duration_sec    INTEGER,
+            duration        INTEGER,
             description     VARCHAR,
             audio_url       VARCHAR,
             mp3_key         VARCHAR
@@ -311,9 +312,9 @@ public class DataHandler {
 
                 for (Episode e : episodes) {
                     insert.setInt(1, e.episodeNumber());
-                    insert.setString(2, e.displayTitle());
+                    insert.setString(2, e.title());
                     insert.setObject(3, e.pubDate());
-                    insert.setInt(4, e.durationSec());
+                    insert.setInt(4, e.duration());
                     insert.setString(5, e.description());
                     insert.setString(6, e.audioUrl());
                     insert.setString(7, e.mp3Key());
@@ -337,9 +338,83 @@ public class DataHandler {
 
             st.execute("COPY episodes TO 's3://silver/episodes/episodes.parquet' (FORMAT parquet)");
             st.execute("COPY events TO 's3://silver/events/events.parquet' (FORMAT parquet)");
+
+            System.out.println("Data copied into parquets");
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
 
-}
+    static void createDB () {
+        String pgUrl = System.getenv().getOrDefault("PG_URL", "jdbc:postgresql://localhost:5433/postgres");
+
+        try (Connection pg = DriverManager.getConnection(pgUrl, "postgres", "postgres");
+             Statement st = pg.createStatement()) {
+
+            st.execute("DROP TABLE IF EXISTS events");
+            st.execute("DROP TABLE IF EXISTS episodes");
+
+            st.execute("""
+                    CREATE TABLE episodes (
+                        episode_number  INTEGER PRIMARY KEY,
+                        title           VARCHAR NOT NULL,
+                        pub_date        TIMESTAMP NOT NULL,
+                        duration        INTEGER NOT NULL,
+                        description     VARCHAR NOT NULL,
+                        audio_url       VARCHAR NOT NULL,
+                        mp3_key         VARCHAR NOT NULL
+                    )""");
+            st.execute("""
+                    CREATE TABLE events (
+                        event_time      TIMESTAMP NOT NULL,
+                        uuid            UUID NOT NULL,
+                        event_type      VARCHAR NOT NULL,
+                        episode_num     INTEGER NOT NULL REFERENCES episodes (episode_number),
+                        file_key        VARCHAR NOT NULL
+                    )""");
+
+            System.out.println("Gold tables created");
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+        try (Connection db = DriverManager.getConnection("jdbc:duckdb:");
+             Statement st = db.createStatement()) {
+
+            st.execute("INSTALL httpfs");
+            st.execute("LOAD httpfs");
+            st.execute("""
+                    CREATE SECRET minio (
+                        TYPE S3,
+                        KEY_ID 'minioadmin',
+                        SECRET 'minioadmin',
+                        ENDPOINT 'localhost:9000',
+                        URL_STYLE 'path',
+                        USE_SSL false
+                    )""");
+
+            st.execute("INSTALL postgres");
+            st.execute("LOAD postgres");
+            st.execute("ATTACH 'host=localhost port=5433 dbname=postgres user=postgres password=postgres' AS pg (TYPE postgres)");
+
+            st.execute("""
+            INSERT INTO pg.public.episodes
+            SELECT episode_number, title, pub_date, duration, description, audio_url, mp3_key
+            FROM read_parquet('s3://silver/episodes/episodes.parquet')
+            """);
+
+                st.execute("""
+            INSERT INTO pg.public.events (event_time, uuid, event_type, episode_num, file_key)
+            SELECT event_time, uuid, event_type, episode_num, file_key
+            FROM read_parquet('s3://silver/events/events.parquet')
+            """);
+
+                System.out.println("Data copied to Gold");
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    }
