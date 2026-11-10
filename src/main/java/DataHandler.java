@@ -129,7 +129,6 @@ public class DataHandler {
                                 .object("raw/interactions/" + fileName)
                                 .filename(file.toString())
                                 .build());
-                System.out.println("Printed " + fileName);
                 }
             }
 
