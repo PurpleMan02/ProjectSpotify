@@ -105,17 +105,32 @@ public class DataHandler {
         LocalTime timeStartUp = LocalTime.now();
         System.out.println("Transferring raw files to bronze");
 
+        Set<String> existingData = new HashSet<>();
+
+        for (Result<Item> result : minio.listObjects(
+                ListObjectsArgs.builder()
+                        .bucket("bronze")
+                        .prefix("raw/interactions/")
+                        .recursive(true)
+                        .build())) {
+            existingData.add(result.get().objectName());
+        }
+
         List<Path> files;
         try (Stream<Path> stream = Files.list(folder)) {files = stream.toList();}
 
         for (Path file : files) {
             String fileName = file.getFileName().toString();
-            minio.uploadObject(
-                    UploadObjectArgs.builder()
-                            .bucket(bucket)
-                            .object("raw/interactions/" + fileName)
-                            .filename(file.toString())
-                            .build());
+            String key = "raw/interactions/" + fileName;
+            if (!existingData.contains(key)) {
+                minio.uploadObject(
+                        UploadObjectArgs.builder()
+                                .bucket(bucket)
+                                .object("raw/interactions/" + fileName)
+                                .filename(file.toString())
+                                .build());
+                System.out.println("Printed " + fileName);
+                }
             }
 
         minio.uploadObject(
